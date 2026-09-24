@@ -186,6 +186,9 @@
     engineFilter: null,
     grassSrc: null,
     grassGain: null,
+    squealSrc: null,
+    squealFilter: null,
+    squealGain: null,
     bgAudioEl: null,
     bgMusicGain: null,
 
@@ -198,6 +201,7 @@
       this.master.connect(this.ctx.destination);
       this._setupEngine();
       this._setupGrass();
+      this._setupSqueal();
       this._setupBgMusic();
     },
 
@@ -282,6 +286,38 @@
       const t = this.ctx.currentTime;
       const target = (onGrass && speedRatio > 0.05) ? 0.16 : 0;
       this.grassGain.gain.setTargetAtTime(target, t, 0.06);
+    },
+
+    _setupSqueal() {
+      const ctx = this.ctx;
+      const bufferSize = ctx.sampleRate * 1;
+      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.loop = true;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = 1900;
+      filter.Q.value = 7;
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      src.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.master);
+      src.start();
+      this.squealSrc = src;
+      this.squealFilter = filter;
+      this.squealGain = gain;
+    },
+
+    updateSqueal(intensity) {
+      if (!this.ctx) return;
+      const t = this.ctx.currentTime;
+      const target = intensity > 0.12 ? Math.min(0.22, intensity * 0.24) : 0;
+      this.squealGain.gain.setTargetAtTime(target, t, 0.04);
+      this.squealFilter.frequency.setTargetAtTime(1700 + Math.min(1, intensity) * 900, t, 0.08);
     },
 
     _tone(freq, dur, type, startDelay, gainVal) {
@@ -437,6 +473,19 @@
 
   function trackDist(a, b) {
     return Math.abs(mod(a - b + trackLen / 2, trackLen) - trackLen / 2);
+  }
+
+  // Wie stark die Strecke bei z gerade biegt (Radiant pro Weltpunkt).
+  // 0 = Gerade, positiv/negativ = Rechts-/Linkskurve. Für die Reifen und
+  // die Wagen-Neigung in der Fahrer-Perspektive.
+  function curvatureAt(z) {
+    const zm = mod(z, trackLen);
+    const i0 = Math.floor(zm / SEG_LEN) % M;
+    const i1 = (i0 + 1) % M;
+    let d = trackTangents[i1] - trackTangents[i0];
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    return d / SEG_LEN;
   }
 
   /* ---------- Sterne ---------- */
@@ -866,9 +915,13 @@
 
   function drawPlayerCarSprite() {
     const w = 168, h = 122;
+    // Die Karosserie lehnt sich sichtbar in Kurven, auch wenn man geradeaus
+    // hält - so wirkt es, als würde das Auto den Kurvenverlauf mitnehmen.
+    const curveLean = curvatureAt(player.z) * 20;
+    const totalLean = curveLean + player.steerState * 0.16;
     ctx.save();
-    ctx.translate(canvas.width / 2 + player.steerState * 20, canvas.height * 0.87);
-    ctx.rotate(player.steerState * 0.05);
+    ctx.translate(canvas.width / 2 + player.steerState * 22 + curveLean * 120, canvas.height * 0.87);
+    ctx.rotate(totalLean);
     drawCarFromBehind(w, h, player.color, { spoiler: true, turbo: player.turboTimer > 0 });
     ctx.restore();
   }
@@ -976,6 +1029,8 @@
     state = 'finished';
     Sound.stopMusic();
     Sound.updateEngine(0, false);
+    Sound.updateGrass(false, 0);
+    Sound.updateSqueal(0);
     const ranking = computeRanking();
     const place = ranking.indexOf(player) + 1;
     const medals = ['🏆', '🥈', '🥉', '🚗'];
@@ -1033,6 +1088,10 @@
 
       Sound.updateEngine(player.speed / MAX_SPEED, true);
       Sound.updateGrass(player.onGrass, Math.abs(player.speed) / MAX_SPEED);
+
+      const curveFactor = Math.abs(curvatureAt(player.z)) * Math.abs(player.speed) / 2.6;
+      const steerFactor = Math.abs(player.steerState) * (Math.abs(player.speed) / MAX_SPEED) * 0.5;
+      Sound.updateSqueal(player.onGrass ? 0 : Math.min(1, curveFactor + steerFactor));
 
       updateHud();
       render();
