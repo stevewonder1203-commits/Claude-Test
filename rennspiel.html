@@ -396,38 +396,75 @@
   };
 
   /* ============================================================
-     STRECKE – abgerundetes Rechteck, als Straßensegmente für die
-     Fahrer-Perspektive (Pseudo-3D-Fluchtpunktstraße)
+     STRECKE – geschlossene Rundstrecke mit Links- und Rechtskurven
+     und einer Schikane, als Straßensegmente für die Fahrer-Perspektive
+     (Pseudo-3D-Fluchtpunktstraße)
      ============================================================ */
-  const TRACK_X0 = 150, TRACK_Y0 = 140, TRACK_X1 = 850, TRACK_Y1 = 520, TRACK_R = 100;
   const TRACK_HALF = 65; // halbe Straßenbreite in Weltpunkten
   const SEG_LEN = 24; // Länge eines Straßensegments in Weltpunkten
 
-  function buildRoundedRectSegments(x0, y0, x1, y1, r) {
-    return [
-      { type: 'line', from: { x: x0 + r, y: y0 }, to: { x: x1 - r, y: y0 } },
-      { type: 'arc', cx: x1 - r, cy: y0 + r, r: r, a0: -Math.PI / 2, a1: 0 },
-      { type: 'line', from: { x: x1, y: y0 + r }, to: { x: x1, y: y1 - r } },
-      { type: 'arc', cx: x1 - r, cy: y1 - r, r: r, a0: 0, a1: Math.PI / 2 },
-      { type: 'line', from: { x: x1 - r, y: y1 }, to: { x: x0 + r, y: y1 } },
-      { type: 'arc', cx: x0 + r, cy: y1 - r, r: r, a0: Math.PI / 2, a1: Math.PI },
-      { type: 'line', from: { x: x0, y: y1 - r }, to: { x: x0, y: y0 + r } },
-      { type: 'arc', cx: x0 + r, cy: y0 + r, r: r, a0: Math.PI, a1: 1.5 * Math.PI }
-    ];
+  // Strecke als Folge von Geraden und Kurven (wie eine Zeichenschildkröte).
+  // Die Kurvenwinkel summieren sich exakt zu 360°, und zwei Geradenlängen
+  // wurden vorab so berechnet, dass die Schleife lückenlos schließt -
+  // damit gibt es echte, unterschiedlich enge Links- und Rechtskurven
+  // (inklusive zweier Schikanen und einer engen Spitzkehre) statt eines
+  // einfachen Ovals.
+  const D2R = Math.PI / 180;
+  const TRACK_COMMANDS = [
+    { type: 'straight', length: 351.31 },
+    { type: 'turn', radius: 150, angle: 45 * D2R },   // sweeping right
+    { type: 'straight', length: 190 },
+    { type: 'turn', radius: 105, angle: -30 * D2R },  // Schikane links
+    { type: 'straight', length: 75 },
+    { type: 'turn', radius: 105, angle: 30 * D2R },   // Schikane rechts
+    { type: 'straight', length: 83.21 },
+    { type: 'turn', radius: 95, angle: 135 * D2R },   // enge Spitzkehre
+    { type: 'straight', length: 260 },
+    { type: 'turn', radius: 105, angle: -26 * D2R },  // kleine Schikane links
+    { type: 'straight', length: 70 },
+    { type: 'turn', radius: 105, angle: 26 * D2R },   // kleine Schikane rechts
+    { type: 'straight', length: 300 },
+    { type: 'turn', radius: 150, angle: 90 * D2R },   // Kurve Richtung Norden
+    { type: 'straight', length: 260 },
+    { type: 'turn', radius: 115, angle: 90 * D2R }    // zurück zur Startgerade
+  ];
+
+  function buildTurtleSegments(x0, y0, heading0, commands) {
+    let x = x0, y = y0, heading = heading0;
+    const segs = [];
+    for (const cmd of commands) {
+      if (cmd.type === 'straight') {
+        const nx = x + Math.cos(heading) * cmd.length;
+        const ny = y + Math.sin(heading) * cmd.length;
+        segs.push({ type: 'line', from: { x, y }, to: { x: nx, y: ny } });
+        x = nx; y = ny;
+      } else {
+        const r = cmd.radius;
+        const sign = Math.sign(cmd.angle);
+        const rightX = -Math.sin(heading), rightY = Math.cos(heading);
+        const cx = x + r * rightX * sign, cy = y + r * rightY * sign;
+        const a0 = Math.atan2(y - cy, x - cx);
+        const a1 = a0 + cmd.angle;
+        segs.push({ type: 'arc', cx, cy, r, a0, a1 });
+        x = cx + Math.cos(a1) * r;
+        y = cy + Math.sin(a1) * r;
+        heading += cmd.angle;
+      }
+    }
+    return segs;
   }
 
-  function sampleRoundedRect(x0, y0, x1, y1, r, ds) {
-    const segs = buildRoundedRectSegments(x0, y0, x1, y1, r);
-    const segLens = segs.map(s => s.type === 'line'
+  function sampleTurtleSegments(segs, ds) {
+    const lens = segs.map(s => s.type === 'line'
       ? Math.hypot(s.to.x - s.from.x, s.to.y - s.from.y)
-      : r * (s.a1 - s.a0));
-    const total = segLens.reduce((a, b) => a + b, 0);
+      : s.r * Math.abs(s.a1 - s.a0));
+    const total = lens.reduce((a, b) => a + b, 0);
     const pts = [];
     for (let s = 0; s < total; s += ds) {
-      let rem = s, segIdx = 0;
-      while (rem > segLens[segIdx] && segIdx < segs.length - 1) { rem -= segLens[segIdx]; segIdx++; }
-      const seg = segs[segIdx];
-      const t = segLens[segIdx] > 0 ? rem / segLens[segIdx] : 0;
+      let rem = s, i = 0;
+      while (rem > lens[i] && i < segs.length - 1) { rem -= lens[i]; i++; }
+      const seg = segs[i];
+      const t = lens[i] > 0 ? rem / lens[i] : 0;
       if (seg.type === 'line') {
         pts.push({ x: seg.from.x + (seg.to.x - seg.from.x) * t, y: seg.from.y + (seg.to.y - seg.from.y) * t });
       } else {
@@ -440,7 +477,7 @@
 
   function mod(n, m) { return ((n % m) + m) % m; }
 
-  const roadSample = sampleRoundedRect(TRACK_X0, TRACK_Y0, TRACK_X1, TRACK_Y1, TRACK_R, SEG_LEN);
+  const roadSample = sampleTurtleSegments(buildTurtleSegments(300, 800, 0, TRACK_COMMANDS), SEG_LEN);
   const trackPts = roadSample.pts;
   const trackLen = roadSample.total;
   const M = trackPts.length;
@@ -511,6 +548,7 @@
   const REVERSE_MAX = 90;
   const REVERSE_ACCEL = 160;
   const LATERAL_RATE = 100; // max. seitliche Geschwindigkeit in Weltpunkten/s
+  const CENTRIFUGAL = 0.12; // wie stark es in Kurven nach außen zieht
 
   function makeCar(color, isPlayer, gridIndex) {
     const z = trackLen - 40 - gridIndex * 44;
@@ -602,6 +640,10 @@
 
     const speedFactor = Math.max(0.25, Math.min(1, Math.abs(car.speed) / 90));
     car.x += car.steerState * LATERAL_RATE * speedFactor * dt;
+    // Fliehkraft: In Kurven zieht es nach außen. Wer nicht gegenlenkt,
+    // landet in der Wiese - die Strecke hat jetzt echte Links- und
+    // Rechtskurven, sodass sich das über eine Runde nicht aufsummiert.
+    car.x -= curvatureAt(car.z) * car.speed * Math.abs(car.speed) * CENTRIFUGAL * dt;
     car.z += car.speed * dt;
 
     if (car.turboTimer > 0) car.turboTimer = Math.max(0, car.turboTimer - dt);
